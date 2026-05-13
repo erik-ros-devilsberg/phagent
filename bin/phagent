@@ -1,0 +1,38 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use Phagent\AgentLoop;
+use Phagent\Client\AnthropicClient;
+use Phagent\StdoutLogger;
+use Phagent\Tool\GetCurrentTimeTool;
+use Phagent\Tool\ToolRegistry;
+
+$prompt = $argv[1] ?? null;
+if (!is_string($prompt) || trim($prompt) === '') {
+    $stdin = stream_get_contents(STDIN);
+    $prompt = is_string($stdin) ? trim($stdin) : '';
+}
+
+if ($prompt === '') {
+    fwrite(STDERR, "Usage: phagent <prompt>\n  or:  echo <prompt> | phagent\n");
+    exit(1);
+}
+
+try {
+    $client = AnthropicClient::fromEnvironment();
+} catch (\RuntimeException $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
+
+$registry = new ToolRegistry();
+$registry->register(new GetCurrentTimeTool());
+
+$loop = new AgentLoop($client, $registry, new StdoutLogger());
+$answer = $loop->run($prompt);
+
+echo $answer, "\n";

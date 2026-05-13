@@ -38,3 +38,46 @@ Established the PHP project foundation. Every later sprint builds on this.
 - `config/` directory — skipped; create when the first config file actually lands.
 - Git initialisation — explicitly skipped by user direction at the end of execution.
 
+## Agent Loop (2026-05-13)
+
+**Stories:** [02-agent-loop](user-stories/done/02-agent-loop.md)
+
+Delivered the multi-turn tool-use cycle that drives the harness. Every future capability — more tools, memory, transcripts, a UI — hangs off this loop.
+
+### What was built
+
+- `src/AgentLoop.php` — the loop. Takes a `ClientInterface`, a `ToolRegistry`, and an optional `Logger`. Maintains the message list, dispatches `tool_use` blocks to registered handlers, feeds `tool_result` back as the next user turn, and terminates on any non-`tool_use` stop reason. Hard cap at 10 iterations (constant `MAX_TURNS`), throwing `LoopLimitException`.
+- `src/Client/ClientInterface.php` — single `sendMessages(array $messages, array $tools): array`. Keeps the loop pure and lets tests inject anonymous fakes instead of mocking Guzzle.
+- `src/Client/AnthropicClient.php` — Guzzle-backed implementation. Pins `claude-sonnet-4-6`, `max_tokens=1024`, anthropic-version `2023-06-01`. Factory `fromEnvironment()` reads `ANTHROPIC_API_KEY` and throws before any HTTP call if missing.
+- `src/Tool/Tool.php`, `src/Tool/ToolRegistry.php`, `src/Tool/GetCurrentTimeTool.php` — interface, dict-backed registry (`register`/`get`/`allSchemas`), and the first concrete tool (returns `(string) time()`).
+- `src/Logger.php`, `src/StdoutLogger.php` — per-turn logger abstraction. CLI wires `StdoutLogger`; tests pass `null` so they stay output-clean under strict PHPUnit config.
+- `src/Exception/LoopLimitException.php` — typed exception for the iteration cap.
+- `bin/phagent` — executable shebanged entry point. Reads prompt from `argv[1]` or stdin, wires `AnthropicClient` + `ToolRegistry` + `StdoutLogger`, prints the final answer.
+- `tests/AgentLoopTest.php` (3 cases: no-tool path, single-tool path with `tool_result` round-trip assertions, iteration-cap exception). `tests/ToolRegistryTest.php` (3 cases).
+
+### Key decisions
+
+- **`ClientInterface` over Guzzle mocks.** A single-method PHP interface returning a decoded array is dramatically easier to fake than `GuzzleHttp\Psr7\Response` with a JSON body, and the test fakes read like the API protocol itself. Worth one extra file.
+- **`Logger` abstraction.** Forced by `phpunit.xml`'s `beStrictAboutOutputDuringTests` + `failOnRisky`. Inline `fwrite(STDOUT, …)` would have made every loop test risky. Two-file cost (interface + stdout impl); the CLI is the only producer.
+- **`fromEnvironment()` factory.** Reading `ANTHROPIC_API_KEY` lives in the factory, not in `sendMessages()`, so the constructor stays pure and the env-coupled code is identifiable by name.
+- **PHPStan level 8 + JSON arrays.** Decoded API responses are walked through tight `is_string` / `is_array` guards (`stringField`, `listField` helpers in `AgentLoop`, key-loop validation in `AnthropicClient`). No `@phpstan-ignore` lines.
+- **Model `claude-sonnet-4-6` pinned as class constant.** The shaping agent originally proposed a non-existent `claude-opus-4-5`; corrected during plan review. Pinned as a `public const string` so swaps are a one-line edit.
+- **`bin/phagent` not linted.** Shebang + no `.php` extension trips PHP-CS-Fixer's default finder. File is tiny and reviewed; not worth a custom Finder configuration.
+
+### Verification
+
+`composer check` exits zero across 13 PHP files: PHP-CS-Fixer clean, PHPStan level 8 with zero errors, PHPUnit 7 tests / 18 assertions all green. The loop has not yet been smoke-tested against the live Anthropic API.
+
+### Capabilities after this sprint
+
+- Single-prompt CLI invocation: `bin/phagent "<prompt>"` (or piped on stdin) prints the final text answer.
+- One registered tool: `get_current_time`. The loop will call it when the model asks and feed the timestamp back.
+- Per-turn observability to stdout via `StdoutLogger`.
+
+### Not yet supported (foreseeable next sprints)
+
+- No conversation memory across invocations.
+- No tool surface beyond `get_current_time` (no filesystem, shell, HTTP fetch, etc.).
+- No streaming, no system prompt customisation, no runtime model selection.
+- No live-API integration test — only stubbed-client unit tests.
+
