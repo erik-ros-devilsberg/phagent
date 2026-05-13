@@ -1,0 +1,8 @@
+/vendor/
+/composer.phar
+/.phpunit.cache/
+/.php-cs-fixer.cache
+/.phpstan.cache/
+/.env
+/.idea/
+/.vscode/
