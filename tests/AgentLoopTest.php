@@ -21,7 +21,7 @@ final class AgentLoopTest extends TestCase
     public function testReturnsFinalTextWhenModelDoesNotCallTools(): void
     {
         $client = new class () implements ClientInterface {
-            public function sendMessages(array $messages, array $tools): array
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
             {
                 return [
                     'stop_reason' => 'end_turn',
@@ -34,7 +34,11 @@ final class AgentLoopTest extends TestCase
 
         $loop = new AgentLoop($client, new ToolRegistry());
 
-        self::assertSame('hello world', $loop->run('hi'));
+        $result = $loop->run('hi');
+
+        self::assertSame('hello world', $result->text);
+        self::assertSame('end_turn', $result->stopReason);
+        self::assertSame(1, $result->turns);
     }
 
     public function testExecutesToolAndFeedsResultBackToModel(): void
@@ -44,7 +48,7 @@ final class AgentLoopTest extends TestCase
             /** @var list<array<string, mixed>> */
             public array $lastMessages = [];
 
-            public function sendMessages(array $messages, array $tools): array
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
             {
                 $this->calls++;
                 $this->lastMessages = $messages;
@@ -103,7 +107,11 @@ final class AgentLoopTest extends TestCase
 
         $loop = new AgentLoop($client, $registry);
 
-        self::assertSame('done: ping', $loop->run('say ping'));
+        $result = $loop->run('say ping');
+
+        self::assertSame('done: ping', $result->text);
+        self::assertSame('end_turn', $result->stopReason);
+        self::assertSame(2, $result->turns);
         self::assertSame(2, $client->calls);
 
         $lastMessage = $client->lastMessages[count($client->lastMessages) - 1];
@@ -121,7 +129,7 @@ final class AgentLoopTest extends TestCase
         $client = new class () implements ClientInterface {
             public int $calls = 0;
 
-            public function sendMessages(array $messages, array $tools): array
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
             {
                 $this->calls++;
                 if ($this->calls === 1) {
@@ -199,10 +207,89 @@ final class AgentLoopTest extends TestCase
         self::assertNotEmpty($toolDebug, 'Expected a debug record with tool=echo in context.');
     }
 
+    public function testThreadsSystemPromptToClient(): void
+    {
+        $client = new class () implements ClientInterface {
+            public ?string $lastSystemPrompt = 'unset';
+
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
+            {
+                $this->lastSystemPrompt = $systemPrompt;
+
+                return [
+                    'stop_reason' => 'end_turn',
+                    'content' => [['type' => 'text', 'text' => 'ok']],
+                ];
+            }
+        };
+
+        $loop = new AgentLoop($client, new ToolRegistry());
+        $loop->run('hi', 'You are a terse assistant.');
+
+        self::assertSame('You are a terse assistant.', $client->lastSystemPrompt);
+    }
+
+    public function testRespectsConfiguredMaxTurns(): void
+    {
+        $client = new class () implements ClientInterface {
+            public int $calls = 0;
+
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
+            {
+                $this->calls++;
+
+                return [
+                    'stop_reason' => 'tool_use',
+                    'content' => [
+                        [
+                            'type' => 'tool_use',
+                            'id' => 'toolu_cap',
+                            'name' => 'noop',
+                            'input' => [],
+                        ],
+                    ],
+                ];
+            }
+        };
+
+        $registry = new ToolRegistry();
+        $registry->register(new class () implements Tool {
+            public function name(): string
+            {
+                return 'noop';
+            }
+
+            public function description(): string
+            {
+                return 'No-op.';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function execute(array $input): string
+            {
+                return 'ok';
+            }
+        });
+
+        $loop = new AgentLoop($client, $registry, null, maxTurns: 2);
+
+        try {
+            $loop->run('go');
+            self::fail('Expected LoopLimitException.');
+        } catch (LoopLimitException $e) {
+            self::assertSame(2, $client->calls);
+            self::assertStringContainsString('2 turns', $e->getMessage());
+        }
+    }
+
     public function testThrowsWhenIterationCapExceeded(): void
     {
         $client = new class () implements ClientInterface {
-            public function sendMessages(array $messages, array $tools): array
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
             {
                 return [
                     'stop_reason' => 'tool_use',

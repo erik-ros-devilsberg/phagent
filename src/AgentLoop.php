@@ -11,24 +11,25 @@ use Psr\Log\LoggerInterface;
 
 final class AgentLoop
 {
-    public const int MAX_TURNS = 10;
+    public const int DEFAULT_MAX_TURNS = 10;
 
     public function __construct(
         private readonly ClientInterface $client,
         private readonly ToolRegistry $tools,
         private readonly ?LoggerInterface $logger = null,
+        private readonly int $maxTurns = self::DEFAULT_MAX_TURNS,
     ) {
     }
 
-    public function run(string $prompt): string
+    public function run(string $prompt, ?string $systemPrompt = null): AgentResult
     {
         $messages = [
             ['role' => 'user', 'content' => $prompt],
         ];
         $this->logger?->info('user prompt', ['prompt' => $prompt]);
 
-        for ($turn = 1; $turn <= self::MAX_TURNS; $turn++) {
-            $response = $this->client->sendMessages($messages, $this->tools->allSchemas());
+        for ($turn = 1; $turn <= $this->maxTurns; $turn++) {
+            $response = $this->client->sendMessages($messages, $this->tools->allSchemas(), $systemPrompt);
 
             $stopReason = $this->stringField($response, 'stop_reason');
             $content = $this->listField($response, 'content');
@@ -41,7 +42,11 @@ final class AgentLoop
             ]);
 
             if ($stopReason !== 'tool_use') {
-                return $this->finalText($content);
+                return new AgentResult(
+                    text: $this->finalText($content),
+                    stopReason: $stopReason,
+                    turns: $turn,
+                );
             }
 
             $toolResults = $this->runToolCalls($content, $turn);
@@ -49,7 +54,7 @@ final class AgentLoop
         }
 
         throw new LoopLimitException(
-            sprintf('Agent loop exceeded %d turns without completing.', self::MAX_TURNS),
+            sprintf('Agent loop exceeded %d turns without completing.', $this->maxTurns),
         );
     }
 

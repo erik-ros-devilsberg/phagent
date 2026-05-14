@@ -33,6 +33,7 @@ $registry = new ToolRegistry();
 $registry->register(new GetCurrentTimeTool());
 
 $loop = new AgentLoop($client, $registry, new StdoutLogger());
-$answer = $loop->run($prompt);
+$result = $loop->run($prompt);
 
-echo $answer, "\n";
+echo $result->text, "\n";
+fwrite(STDERR, sprintf("[turns=%d stop_reason=%s]\n", $result->turns, $result->stopReason));

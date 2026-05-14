@@ -8,14 +8,16 @@ use GuzzleHttp\ClientInterface as GuzzleClientInterface;
 
 final class AnthropicClient implements ClientInterface
 {
-    public const string MODEL = 'claude-sonnet-4-6';
-    public const int MAX_TOKENS = 1024;
+    public const string DEFAULT_MODEL = 'claude-sonnet-4-6';
+    public const int DEFAULT_MAX_TOKENS = 1024;
     public const string API_URL = 'https://api.anthropic.com/v1/messages';
     public const string API_VERSION = '2023-06-01';
 
     public function __construct(
         private readonly GuzzleClientInterface $http,
         private readonly string $apiKey,
+        private readonly string $model = self::DEFAULT_MODEL,
+        private readonly int $maxTokens = self::DEFAULT_MAX_TOKENS,
     ) {
         if ($apiKey === '') {
             throw new \InvalidArgumentException('Anthropic API key must not be empty.');
@@ -34,13 +36,16 @@ final class AnthropicClient implements ClientInterface
         return new self($http ?? new \GuzzleHttp\Client(), $apiKey);
     }
 
-    public function sendMessages(array $messages, array $tools): array
+    public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
     {
         $payload = [
-            'model' => self::MODEL,
-            'max_tokens' => self::MAX_TOKENS,
+            'model' => $this->model,
+            'max_tokens' => $this->maxTokens,
             'messages' => $messages,
         ];
+        if ($systemPrompt !== null) {
+            $payload['system'] = $systemPrompt;
+        }
         if ($tools !== []) {
             $payload['tools'] = $tools;
         }

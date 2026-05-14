@@ -12,5 +12,5 @@ interface ClientInterface
      *
      * @return array<string, mixed>
      */
-    public function sendMessages(array $messages, array $tools): array;
+    public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array;
 }

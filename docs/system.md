@@ -108,3 +108,50 @@ Replaced the project-internal `Phagent\Logger` interface with `Psr\Log\LoggerInt
 
 `composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 8 tests / 21 assertions green (was 7 / 18 — new test added one case, three assertions).
 
+## Agent configuration and structured result (2026-05-14)
+
+**Stories:** [05-agent-configuration](user-stories/done/05-agent-configuration.md)
+
+Brought the public API surface up to the minimum needed for a Laravel app to drive task-specific agents (the 1m.news pattern: separate selector / researcher / drafter services, each with its own model, token budget, and system prompt). One coherent API revision: system prompt, configurable model / `max_tokens` / `max_turns`, and a structured `AgentResult` return.
+
+### What was built / changed
+
+- `src/AgentResult.php` — new `final readonly` value object with `public string $text`, `public string $stopReason`, `public int $turns`. PHP-native, three fields, no methods. The kernel's return shape from `AgentLoop::run`.
+- `src/Client/ClientInterface.php` — `sendMessages` gains `?string $systemPrompt = null` as a third parameter. Breaking change to any implementer (only `AnthropicClient` and test fakes today).
+- `src/Client/AnthropicClient.php`:
+  - Constructor now takes `string $model = self::DEFAULT_MODEL` and `int $maxTokens = self::DEFAULT_MAX_TOKENS` as parameters. Old `MODEL` / `MAX_TOKENS` consts renamed to `DEFAULT_MODEL` / `DEFAULT_MAX_TOKENS`.
+  - `sendMessages` reads `$this->model` and `$this->maxTokens` (not the constants) and adds a top-level `system` field to the payload when `$systemPrompt !== null`. The `system` key is omitted entirely when null — no `"system": null` on the wire.
+- `src/AgentLoop.php`:
+  - Constructor takes `int $maxTurns = self::DEFAULT_MAX_TURNS` as a fourth parameter; the loop bound is now `$this->maxTurns`. Const renamed `MAX_TURNS` → `DEFAULT_MAX_TURNS`.
+  - `run(string $prompt, ?string $systemPrompt = null): AgentResult` — system prompt is per-call. Threaded to every `$this->client->sendMessages(...)` call. Natural completion path builds and returns an `AgentResult`; the iteration cap still throws `LoopLimitException`.
+- `tests/AgentLoopTest.php` — existing happy-path tests updated to assert `AgentResult` fields (`text`, `stopReason`, `turns`) instead of bare strings. Two new tests: `testThreadsSystemPromptToClient` (anonymous client records `$systemPrompt`, asserts it matches the value passed to `run()`) and `testRespectsConfiguredMaxTurns` (constructs with `maxTurns: 2`, asserts `LoopLimitException` after exactly 2 client calls).
+- `tests/Client/AnthropicClientTest.php` — new. Five tests asserting outgoing request body contains the right `model`, `max_tokens`, and `system` (or omits `system` when null), plus the empty-API-key rejection. Uses a custom Guzzle callable handler that captures `RequestInterface`s into a class property — avoids the type-narrowing trouble that `Middleware::history` causes at PHPStan level 8.
+- `examples/run.php` — captures `$result = $loop->run(...)`, prints `$result->text` to stdout and `[turns=N stop_reason=…]` to stderr.
+
+### Key decisions
+
+- **System prompt is per-call.** Best fit for the use case: one `AgentLoop` instance per task, each `run()` invocation can vary the system prompt if needed. Callers who want a pre-baked prompt can wrap `AgentLoop` in their own service.
+- **Model, `max_tokens`, `max_turns` are per-instance.** They're properties of "which agent this is," not of "what you're asking it right now." Matches how 1m.news instantiates one service per agent — and means you don't pass these on every call.
+- **`AgentResult` has three fields and no methods.** Resisted adding a `metadata` array, cost tracking, or a `structured` JSON-decoded field. Each of those is a future story; speculative APIs rot fast. If a caller wants JSON, they `json_decode($result->text, true)` themselves — the kernel does not guess what shape they want.
+- **Default constants live on the implementations, not the interface.** `DEFAULT_MAX_TURNS` is on `AgentLoop`; `DEFAULT_MODEL` / `DEFAULT_MAX_TOKENS` on `AnthropicClient`. The interface stays a contract, not a config carrier.
+- **`fromEnvironment()` signature unchanged.** Adding model/maxTokens overrides to the factory would have meant either env-var conventions (`PHAGENT_MODEL`?) or a config object — both feel premature. Callers who want non-default model/tokens use the constructor directly.
+- **Custom Guzzle handler over `Middleware::history` in tests.** The history middleware is typed `array|ArrayAccess` and forces PHPStan to widen the `&$container` reference, which broke a tighter return type on the test helper. A small callable handler that pushes captured requests into a `list<RequestInterface>` class property is both shorter and stays well-typed.
+- **No back-compat shim on `ClientInterface`.** Third param added cleanly; no external implementations exist.
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 15 tests / 43 assertions green (was 8 / 21 — added 7 tests, 22 assertions across two test files).
+
+### Capabilities after this sprint
+
+- `new AnthropicClient($http, $apiKey, model: 'claude-haiku-4-5-20251001', maxTokens: 256)` — one cheap configuration per agent.
+- `new AgentLoop($client, $tools, maxTurns: 2)` — bounded loop budget per agent.
+- `$loop->run($userPrompt, $systemPrompt)` — task identity and per-call input cleanly separated, returns an `AgentResult` carrying `text`, `stopReason`, `turns`.
+
+### Not yet supported (foreseeable next sprints)
+
+- No JSON-schema / structured-output enforcement. Callers prompt for JSON in the system message and parse text themselves.
+- No cost / token-usage metadata on `AgentResult`. The Anthropic response carries `usage` but it's discarded today.
+- No way to swap the tool set per `run()` call — the registry is fixed at construction.
+- `fromEnvironment()` still ignores model/tokens overrides.
+
