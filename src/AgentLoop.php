@@ -7,6 +7,7 @@ namespace Phagent;
 use Phagent\Client\ClientInterface;
 use Phagent\Exception\LoopLimitException;
 use Phagent\Tool\ToolRegistry;
+use Psr\Log\LoggerInterface;
 
 final class AgentLoop
 {
@@ -15,7 +16,7 @@ final class AgentLoop
     public function __construct(
         private readonly ClientInterface $client,
         private readonly ToolRegistry $tools,
-        private readonly ?Logger $logger = null,
+        private readonly ?LoggerInterface $logger = null,
     ) {
     }
 
@@ -24,7 +25,7 @@ final class AgentLoop
         $messages = [
             ['role' => 'user', 'content' => $prompt],
         ];
-        $this->log(0, 'user', $prompt);
+        $this->logger?->info('user prompt', ['prompt' => $prompt]);
 
         for ($turn = 1; $turn <= self::MAX_TURNS; $turn++) {
             $response = $this->client->sendMessages($messages, $this->tools->allSchemas());
@@ -33,7 +34,11 @@ final class AgentLoop
             $content = $this->listField($response, 'content');
 
             $messages[] = ['role' => 'assistant', 'content' => $content];
-            $this->log($turn, 'assistant', $this->summarize($content));
+            $this->logger?->info('assistant turn', [
+                'turn' => $turn,
+                'summary' => $this->summarize($content),
+                'stop_reason' => $stopReason,
+            ]);
 
             if ($stopReason !== 'tool_use') {
                 return $this->finalText($content);
@@ -71,7 +76,12 @@ final class AgentLoop
 
             /** @var array<string, mixed> $input */
             $output = $this->tools->get($name)->execute($input);
-            $this->log($turn, 'tool_result', sprintf('%s → %s', $name, $output));
+            $this->logger?->debug('tool call', [
+                'turn' => $turn,
+                'tool' => $name,
+                'input' => $input,
+                'output' => $output,
+            ]);
 
             $results[] = [
                 'type' => 'tool_result',
@@ -158,10 +168,5 @@ final class AgentLoop
         }
 
         return $list;
-    }
-
-    private function log(int $turn, string $role, string $text): void
-    {
-        $this->logger?->log($turn, $role, $text);
     }
 }

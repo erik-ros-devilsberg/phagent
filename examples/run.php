@@ -1,13 +1,13 @@
-#!/usr/bin/env php
 <?php
 
 declare(strict_types=1);
 
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/StdoutLogger.php';
 
 use Phagent\AgentLoop;
 use Phagent\Client\AnthropicClient;
-use Phagent\StdoutLogger;
+use Phagent\Examples\StdoutLogger;
 use Phagent\Tool\GetCurrentTimeTool;
 use Phagent\Tool\ToolRegistry;
 
@@ -18,7 +18,7 @@ if (!is_string($prompt) || trim($prompt) === '') {
 }
 
 if ($prompt === '') {
-    fwrite(STDERR, "Usage: phagent <prompt>\n  or:  echo <prompt> | phagent\n");
+    fwrite(STDERR, "Usage: php examples/run.php <prompt>\n  or:  echo <prompt> | php examples/run.php\n");
     exit(1);
 }
 

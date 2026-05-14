@@ -81,3 +81,30 @@ Delivered the multi-turn tool-use cycle that drives the harness. Every future ca
 - No streaming, no system prompt customisation, no runtime model selection.
 - No live-API integration test — only stubbed-client unit tests.
 
+## PSR-3 logging (2026-05-14)
+
+**Stories:** [03-psr3-logging](user-stories/done/03-psr3-logging.md)
+
+Replaced the project-internal `Phagent\Logger` interface with `Psr\Log\LoggerInterface`. Honours the **PSR-friendly** promise in `CLAUDE.md`: an embedding application (Laravel, Symfony, plain PHP) passes its own logger in; phagent doesn't impose one or ask the embedder to learn a custom interface.
+
+### What was built / changed
+
+- `composer.json` — added `psr/log: ^3` to `require`.
+- `src/AgentLoop.php` — constructor now takes `?Psr\Log\LoggerInterface $logger = null`. Per-turn boundaries log at `info` (`'user prompt'`, `'assistant turn'` with `turn`, `summary`, `stop_reason` in context). Tool calls log at `debug` (`'tool call'` with `turn`, `tool`, `input`, `output` in context). The private `log()` helper is gone; call sites use `$this->logger?->info(...)` / `->debug(...)` directly.
+- `src/Logger.php` and `src/StdoutLogger.php` — deleted. The kernel no longer ships a concrete logger.
+- `examples/StdoutLogger.php` — new. `Phagent\Examples\StdoutLogger` extends `Psr\Log\AbstractLogger` and writes formatted lines (`[level] message {context-as-json}`) to STDOUT. ~20 LOC. Lives next to `run.php`, not in `src/`, because it's example wiring, not kernel.
+- `examples/run.php` — explicit `require_once __DIR__ . '/StdoutLogger.php';` (the `examples/` directory is not autoloaded), instantiates the new example logger.
+- `tests/AgentLoopTest.php` — added `testEmitsPsr3LogRecords`. Uses an inline `AbstractLogger` subclass that records every `log()` call; asserts both `info` and `debug` levels appear and that a debug record carries `tool: 'echo'` in its context.
+
+### Key decisions
+
+- **No external logger dependency.** `psr/log` is the interface only. A ~20-line stdout implementation in `examples/` beats pulling in Monolog for an example file.
+- **Concrete logger lives in `examples/`, not `src/`.** The kernel exposes the PSR-3 port; concrete loggers belong to the embedder. Putting a default in `src/` would tempt future code to grow opinions about formatting and levels.
+- **`examples/` is not PSR-4 autoloaded.** `run.php` `require_once`s the example logger explicitly. Keeps `Phagent\` namespace strictly aligned with `src/`. PHPStan and PHP-CS-Fixer already only scan `src/` and `tests/`, so the example file is intentionally outside both gates.
+- **Log levels — `info` for boundaries, `debug` for payloads.** Nothing higher. The kernel does not decide what's a warning or error for the embedder; if a tool throws, that surfaces as an exception, not a log line.
+- **No back-compat shim.** Old `Phagent\Logger` deleted outright; no deprecation period needed in a pre-1.0 library with no external consumers.
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 8 tests / 21 assertions green (was 7 / 18 — new test added one case, three assertions).
+

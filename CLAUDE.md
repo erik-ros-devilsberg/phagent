@@ -1,10 +1,25 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project
 
-`phagent` is a simple AI agent harness written in PHP 8.4. The agent loop (Anthropic Messages API, multi-turn tool-use) is still ahead — see [`docs/user-stories/backlog/02-agent-loop.md`](docs/user-stories/backlog/02-agent-loop.md).
+`phagent` is a minimal, framework-agnostic AI agent harness in PHP 8.4. See [`docs/system.md`](docs/system.md) for cumulative architecture.
+
+The kernel makes these promises:
+
+- **Library-first.** Embeddable in a Laravel queue job, a Symfony controller, a plain PHP script, a CLI.
+- **Prompt in, result out.** One call gives a prompt (which specifies the desired output shape) and gets back the final result. The kernel runs the agentic loop — tool calls, file ops, multiple turns — internally. It persists nothing across calls.
+- **No framework coupling in the kernel.** No Laravel service provider, no Symfony bundle, no opinions about routing, queues, or the request lifecycle. Those belong in adapter packages on top.
+- **Provider-agnostic.** `Client\ClientInterface` is the port. Adapters (Anthropic, OpenAI, …) are thin and live behind it.
+- **PSR-friendly.** PSR-3 for logging, PSR-11 for container interop, where they fit. Don't reinvent infrastructure that already has a PSR.
+- **No coding-agent identity in the kernel.** Read/Edit/Bash/Web-style tools — if and when they ship — live in a separate package (e.g. `phagent/coding-tools`), never in `src/`. The same kernel must serve a content-moderation agent and a code-editing agent equally well.
+
+### Drift signals — things that don't belong in `src/`
+
+- `Session` / `Transcript` / `History` types
+- Slash commands, a TUI, plan mode, permission prompts, any human-in-the-loop affordance
+- Laravel- or Symfony-specific dependencies
+- Tools that assume a coding-agent use case (file IO, shell, browser)
+- A hardcoded system prompt at the kernel level
+
+When in doubt: would this make sense for an agent that summarises news articles, runs unattended in a background queue, and never talks to a human? If no, it belongs in a separate package.
 
 ## Stack
 
@@ -18,7 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `src/` — library code, `Phagent\` namespace
 - `tests/` — PHPUnit tests, `Phagent\Tests\` namespace
-- `bin/` — CLI entry points (added by the agent-loop sprint)
+- `examples/` — runnable usage examples (not part of the library surface)
 - `docs/` — agile artefacts (sprints, stories, decisions)
 
 ## Commands
@@ -64,9 +79,9 @@ This project uses the agile plugin. Follow these rules when building features.
 
 - Never start building without an approved sprint plan in `docs/sprints/`
 - Sprint plans are the single source of truth for the sprint — update them as execution progresses
-- Developer writes tests first (red phase), then implements (green phase) — never skip the red phase
-- Review is optional and ad-hoc — trigger it with `/agile:review` when you want it
-- Defects found in review are either fixed immediately or become new user stories
+- Developer writes tests first, then implements — never skip writing tests
+- Review is user invoked — trigger it with `/agile:review`
+- Defects found in review become new user stories
 
 ### Directory structure
 
