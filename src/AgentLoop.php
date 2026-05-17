@@ -28,11 +28,18 @@ final class AgentLoop
         ];
         $this->logger?->info('user prompt', ['prompt' => $prompt]);
 
+        $inputTokens = 0;
+        $outputTokens = 0;
+
         for ($turn = 1; $turn <= $this->maxTurns; $turn++) {
             $response = $this->client->sendMessages($messages, $this->tools->allSchemas(), $systemPrompt);
 
             $stopReason = $this->stringField($response, 'stop_reason');
             $content = $this->listField($response, 'content');
+
+            $usage = is_array($response['usage'] ?? null) ? $response['usage'] : [];
+            $inputTokens += (int) ($usage['input_tokens'] ?? 0);
+            $outputTokens += (int) ($usage['output_tokens'] ?? 0);
 
             $messages[] = ['role' => 'assistant', 'content' => $content];
             $this->logger?->info('assistant turn', [
@@ -46,6 +53,8 @@ final class AgentLoop
                     text: $this->finalText($content),
                     stopReason: $stopReason,
                     turns: $turn,
+                    inputTokens: $inputTokens,
+                    outputTokens: $outputTokens,
                 );
             }
 

@@ -286,6 +286,67 @@ final class AgentLoopTest extends TestCase
         }
     }
 
+    public function testAccumulatesUsageAcrossMultipleTurns(): void
+    {
+        $client = new class () implements ClientInterface {
+            public int $calls = 0;
+
+            public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
+            {
+                $this->calls++;
+                if ($this->calls === 1) {
+                    return [
+                        'stop_reason' => 'tool_use',
+                        'content' => [
+                            [
+                                'type' => 'tool_use',
+                                'id' => 'toolu_usage',
+                                'name' => 'noop',
+                                'input' => [],
+                            ],
+                        ],
+                        'usage' => ['input_tokens' => 100, 'output_tokens' => 50],
+                    ];
+                }
+
+                return [
+                    'stop_reason' => 'end_turn',
+                    'content' => [['type' => 'text', 'text' => 'done']],
+                    'usage' => ['input_tokens' => 200, 'output_tokens' => 30],
+                ];
+            }
+        };
+
+        $registry = new ToolRegistry();
+        $registry->register(new class () implements Tool {
+            public function name(): string
+            {
+                return 'noop';
+            }
+
+            public function description(): string
+            {
+                return 'No-op.';
+            }
+
+            public function inputSchema(): array
+            {
+                return ['type' => 'object'];
+            }
+
+            public function execute(array $input): string
+            {
+                return 'ok';
+            }
+        });
+
+        $loop = new AgentLoop($client, $registry);
+        $result = $loop->run('go');
+
+        self::assertSame(300, $result->inputTokens);
+        self::assertSame(80, $result->outputTokens);
+    }
+
     public function testThrowsWhenIterationCapExceeded(): void
     {
         $client = new class () implements ClientInterface {

@@ -18,9 +18,15 @@ final class AnthropicClientTest extends TestCase
     /** @var list<RequestInterface> */
     private array $captured = [];
 
+    private string $nextResponseBody = '';
+
     protected function setUp(): void
     {
         $this->captured = [];
+        $this->nextResponseBody = (string) json_encode([
+            'stop_reason' => 'end_turn',
+            'content' => [['type' => 'text', 'text' => 'ok']],
+        ]);
     }
 
     public function testUsesDefaultModelAndMaxTokensWhenUnconfigured(): void
@@ -157,6 +163,42 @@ final class AnthropicClientTest extends TestCase
         }
     }
 
+    public function testUsageBlockIsReturnedInNeutralShape(): void
+    {
+        $this->nextResponseBody = (string) json_encode([
+            'stop_reason' => 'end_turn',
+            'content' => [['type' => 'text', 'text' => 'ok']],
+            'usage' => [
+                'input_tokens' => 123,
+                'output_tokens' => 45,
+            ],
+        ]);
+        $client = $this->makeClient();
+
+        $result = $client->sendMessages([['role' => 'user', 'content' => 'hi']], []);
+
+        self::assertSame(
+            ['input_tokens' => 123, 'output_tokens' => 45],
+            $result['usage'] ?? null,
+        );
+    }
+
+    public function testMissingUsageDefaultsToZeros(): void
+    {
+        $this->nextResponseBody = (string) json_encode([
+            'stop_reason' => 'end_turn',
+            'content' => [['type' => 'text', 'text' => 'ok']],
+        ]);
+        $client = $this->makeClient();
+
+        $result = $client->sendMessages([['role' => 'user', 'content' => 'hi']], []);
+
+        self::assertSame(
+            ['input_tokens' => 0, 'output_tokens' => 0],
+            $result['usage'] ?? null,
+        );
+    }
+
     private function makeClient(
         string $model = AnthropicClient::DEFAULT_MODEL,
         int $maxTokens = AnthropicClient::DEFAULT_MAX_TOKENS,
@@ -179,14 +221,19 @@ final class AnthropicClientTest extends TestCase
         $capture = function (RequestInterface $request): void {
             $this->captured[] = $request;
         };
+        $responseBody = function (): string {
+            return $this->nextResponseBody;
+        };
 
-        return new class ($factory, $capture) implements HttpClientInterface {
+        return new class ($factory, $capture, $responseBody) implements HttpClientInterface {
             /**
              * @param \Closure(RequestInterface): void $capture
+             * @param \Closure(): string               $responseBody
              */
             public function __construct(
                 private readonly HttpFactory $factory,
                 private readonly \Closure $capture,
+                private readonly \Closure $responseBody,
             ) {
             }
 
@@ -194,13 +241,8 @@ final class AnthropicClientTest extends TestCase
             {
                 ($this->capture)($request);
 
-                $body = (string) json_encode([
-                    'stop_reason' => 'end_turn',
-                    'content' => [['type' => 'text', 'text' => 'ok']],
-                ]);
-
                 return $this->factory->createResponse(200)
-                    ->withBody($this->factory->createStream($body));
+                    ->withBody($this->factory->createStream(($this->responseBody)()));
             }
         };
     }

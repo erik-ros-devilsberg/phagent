@@ -299,9 +299,15 @@ final class OpenAIClient implements ClientInterface
             $content[] = ['type' => 'text', 'text' => $text];
         }
 
+        $usage = is_array($decoded['usage'] ?? null) ? $decoded['usage'] : [];
+
         return [
             'stop_reason' => $stopReason,
             'content' => $content,
+            'usage' => [
+                'input_tokens' => (int) ($usage['prompt_tokens'] ?? 0),
+                'output_tokens' => (int) ($usage['completion_tokens'] ?? 0),
+            ],
         ];
     }
 }

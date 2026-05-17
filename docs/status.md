@@ -10,3 +10,4 @@ Maintained by the agile plugin. One row per sprint — updated by `/agile:shape`
 | OpenAI provider adapter | 04-openai-provider | done | Second `ClientInterface` adapter (OpenAI Chat Completions) with configurable base URL for any OpenAI-compatible endpoint. |
 | Fix tool_use.input empty-object round-trip | 07-tool-use-empty-input-round-trip | done | Normalise empty `tool_use.input` to JSON object in AnthropicClient outgoing payload. |
 | Symfony HttpClient summariser example | 08-example-symfony-http-client | done | Summariser example wired to Symfony's `Psr18Client` — proves both PSR-18 swap and no-tools / system-prompt agent shape. |
+| Token usage on AgentResult | 10-token-usage-on-agent-result | done | Thread per-turn `usage` through neutral protocol; accumulate input/output tokens across all turns into `AgentResult`. |

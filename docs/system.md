@@ -296,3 +296,46 @@ Added `examples/run-summarise.php` as the executable proof of two distinct kerne
 
 `composer check` exits zero (PHP-CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 31 tests / 90 assertions all green — examples are out of lint and static-analysis scope per `.php-cs-fixer.php` and `phpstan.neon`, both of which already restrict themselves to `src/` and `tests/`). Live-API smoke test against Anthropic is the developer's manual step — `echo "Some article text…" | php examples/run-summarise.php` should produce `turns=1 stop_reason=end_turn`.
 
+## Token usage on AgentResult (2026-05-17)
+
+**Stories:** [10-token-usage-on-agent-result](user-stories/done/10-token-usage-on-agent-result.md)
+
+Added per-turn token usage to the neutral protocol and accumulated input/output token counts onto `AgentResult`. Closes the largest remaining gap for consumers running phagent inside cost-tracked services (the canonical 1m.news pattern: one service per agent, model and budget per service). Previously the adapters discarded `usage` blocks from provider responses entirely; consumers had no way to retrieve token counts short of subclassing the client or sniffing the wire.
+
+### What was built / changed
+
+- `src/AgentResult.php` — appended `public readonly int $inputTokens = 0` and `public readonly int $outputTokens = 0` after the existing `text` / `stopReason` / `turns` fields. Defaults to zero so existing direct constructors keep working; only `AgentLoop` instantiates `AgentResult` in production code today, but the named-arg defaults preserve compatibility for any out-of-tree caller.
+- `src/Client/ClientInterface.php` — Output section of the class docblock extended with the `usage` key: `'usage' => array{input_tokens: int, output_tokens: int}`. The contract explicitly states adapters MUST return `['input_tokens' => 0, 'output_tokens' => 0]` when the upstream response omits usage — the kernel relies on a guaranteed shape for cross-turn accumulation.
+- `src/Client/AnthropicClient.php` — `sendMessages` now appends a normalised `usage` block to the returned array, reading `usage.input_tokens` and `usage.output_tokens` from the Anthropic response with `?? 0` fallback. Previously the adapter passed all top-level keys through unchanged, which accidentally exposed `usage` only when present; now the shape is guaranteed.
+- `src/Client/OpenAIClient.php` — `translateResponse` maps OpenAI's `usage.prompt_tokens` → `input_tokens` and `usage.completion_tokens` → `output_tokens`, with the same `?? 0` fallback. OpenAI returns `usage` on every non-streaming response, so the missing-case path only fires on malformed responses.
+- `src/AgentLoop.php` — initialises `$inputTokens = 0` and `$outputTokens = 0` before the turn loop, accumulates each `sendMessages` response's usage into them, and passes the totals to `new AgentResult(...)` on the natural-completion path. The `LoopLimitException` path discards the partial accumulation — by design; if the loop bombed out, the consumer has no `AgentResult` to attach usage to anyway, and exposing partial usage on an exception adds API surface for an edge case nobody has asked for.
+- `tests/Client/AnthropicClientTest.php` — refactored to use the `$nextResponseBody` per-test override pattern (mirrors `OpenAIClientTest`), then added `testUsageBlockIsReturnedInNeutralShape` and `testMissingUsageDefaultsToZeros`.
+- `tests/Client/OpenAIClientTest.php` — added the same two cases against OpenAI's `prompt_tokens` / `completion_tokens` keys.
+- `tests/AgentLoopTest.php` — added `testAccumulatesUsageAcrossMultipleTurns` with a two-turn fake (turn 1: 100 in / 50 out → `tool_use`; turn 2: 200 in / 30 out → `end_turn`) asserting `$result->inputTokens === 300` and `$result->outputTokens === 80`.
+
+### Key decisions
+
+- **Two scalar fields, not a `$usage` array.** Matches the existing `AgentResult` style (`text`, `stopReason`, `turns` — all flat scalars). Provider-specific extras like Anthropic's `cache_creation_input_tokens` / `cache_read_input_tokens` and OpenAI's `reasoning_tokens` (o1/o3 family) are deliberately out of scope; if they're ever needed, they'll land as named fields, not a metadata bag. Sprint 05's precedent: "Resisted adding a `metadata` array … speculative APIs rot fast."
+- **Zero defaults, not nullable.** A consumer reading `$result->inputTokens` should be able to do `+=` arithmetic without a null check. The `int` type with a `0` default expresses "absence = no tokens" cleanly. Same reasoning for the `ClientInterface` contract requiring zeros (not null, not missing) when upstream usage is absent.
+- **Accumulation in `AgentLoop`, not in the adapter.** Adapters are stateless and return per-call usage; the loop owns the multi-turn run and is the natural place to sum. Avoids any shared mutable state in the adapters.
+- **Discard partial usage on `LoopLimitException`.** If the loop hits its turn cap, no `AgentResult` is constructed and the caller catches an exception — adding `getInputTokens()` / `getOutputTokens()` to the exception class would be API surface for a debugging edge case. Skipped; revisit if a real use case surfaces.
+- **`is_array` guard on the usage path.** PHPStan level 8 requires `$response['usage']` to be unpacked through `is_array(... ?? null) ? ... : []` because `array<string, mixed>` doesn't narrow. The guard adds two lines per call site (adapters + loop), but the alternative is `@phpstan-ignore` lines or widening the return type — neither acceptable per project rules.
+- **No cost calculation.** Pricing is volatile and consumer-specific (per-model rates, regional pricing, volume discounts, prompt caching). The kernel surfaces raw counts; the consumer multiplies by whatever rate sheet they're tracking against.
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit **36 tests / 96 assertions** all green (was 31 / 90 — added 5 tests, 6 assertions). The `AgentLoop` accumulation test exercises a two-turn run end-to-end through both the tool-use branch and the natural-completion branch; the adapter tests exercise both the present-usage and missing-usage paths against the two adapter implementations.
+
+### Capabilities after this sprint
+
+- Every `AgentLoop::run()` call returns an `AgentResult` whose `$inputTokens` and `$outputTokens` carry the summed token usage across all turns of the run.
+- Consumers compute cost as `$result->inputTokens * $inputRate + $result->outputTokens * $outputRate` against whatever rate sheet they track.
+- The neutral protocol exposes `usage` to any future `ClientInterface` implementation; a third-party adapter wiring (e.g. an Ollama native adapter) inherits the contract automatically.
+
+### Not yet supported (foreseeable next sprints)
+
+- **Cache token tracking.** Anthropic's `cache_creation_input_tokens` / `cache_read_input_tokens` and OpenAI's `prompt_tokens_details.cached_tokens` matter for cost once prompt caching is wired in. Out of scope here.
+- **Reasoning-token accounting** (OpenAI o1/o3 family's `reasoning_tokens`). Same future-story bucket.
+- **Per-turn breakdown.** `AgentResult` carries totals only. A `list<array>` of per-turn usage would help debug which turn was expensive but adds API surface for a use case nobody has asked for.
+- **Partial usage on `LoopLimitException`.** See key decisions.
+

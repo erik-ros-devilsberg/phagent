@@ -105,6 +105,12 @@ final class AnthropicClient implements ClientInterface
             $result[$key] = $value;
         }
 
+        $usage = is_array($result['usage'] ?? null) ? $result['usage'] : [];
+        $result['usage'] = [
+            'input_tokens' => (int) ($usage['input_tokens'] ?? 0),
+            'output_tokens' => (int) ($usage['output_tokens'] ?? 0),
+        ];
+
         return $result;
     }
 

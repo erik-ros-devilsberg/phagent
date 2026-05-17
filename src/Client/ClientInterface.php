@@ -31,11 +31,16 @@ namespace Phagent\Client;
  *
  * ## Output — return value
  *
- * `['stop_reason' => string, 'content' => list<block>]` where:
+ * `['stop_reason' => string, 'content' => list<block>, 'usage' => array{input_tokens: int, output_tokens: int}]`
+ * where:
  * - `stop_reason` is one of `'end_turn'`, `'tool_use'`, `'max_tokens'`
  *   (additional values MAY appear but the loop only acts on `'tool_use'`).
  * - `content` blocks are `['type' => 'text', 'text' => string]` or
  *   `['type' => 'tool_use', 'id' => string, 'name' => string, 'input' => array<string, mixed>]`.
+ * - `usage` carries the per-call token counts. When the upstream response omits
+ *   usage (e.g. errors, or providers that do not report it), the adapter MUST
+ *   return `['input_tokens' => 0, 'output_tokens' => 0]` rather than throwing —
+ *   the kernel relies on a guaranteed `usage` shape for cross-turn accumulation.
  *
  * The protocol intentionally mirrors Anthropic's block shape because that shape
  * is a superset of what other providers (OpenAI, Ollama, etc.) emit. Adapters

@@ -252,6 +252,47 @@ final class OpenAIClientTest extends TestCase
         self::assertSame('application/json', $request->getHeaderLine('content-type'));
     }
 
+    public function testUsageBlockIsReturnedInNeutralShape(): void
+    {
+        $this->nextResponseBody = (string) json_encode([
+            'choices' => [[
+                'message' => ['role' => 'assistant', 'content' => 'ok'],
+                'finish_reason' => 'stop',
+            ]],
+            'usage' => [
+                'prompt_tokens' => 123,
+                'completion_tokens' => 45,
+                'total_tokens' => 168,
+            ],
+        ]);
+        $client = $this->makeClient();
+
+        $result = $client->sendMessages([['role' => 'user', 'content' => 'hi']], []);
+
+        self::assertSame(
+            ['input_tokens' => 123, 'output_tokens' => 45],
+            $result['usage'] ?? null,
+        );
+    }
+
+    public function testMissingUsageDefaultsToZeros(): void
+    {
+        $this->nextResponseBody = (string) json_encode([
+            'choices' => [[
+                'message' => ['role' => 'assistant', 'content' => 'ok'],
+                'finish_reason' => 'stop',
+            ]],
+        ]);
+        $client = $this->makeClient();
+
+        $result = $client->sendMessages([['role' => 'user', 'content' => 'hi']], []);
+
+        self::assertSame(
+            ['input_tokens' => 0, 'output_tokens' => 0],
+            $result['usage'] ?? null,
+        );
+    }
+
     public function testFinishReasonLengthMapsToMaxTokens(): void
     {
         $this->nextResponseBody = (string) json_encode([
