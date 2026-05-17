@@ -63,7 +63,7 @@ final class AnthropicClient implements ClientInterface
         $payload = [
             'model' => $this->model,
             'max_tokens' => $this->maxTokens,
-            'messages' => $messages,
+            'messages' => $this->normaliseMessages($messages),
         ];
         if ($systemPrompt !== null) {
             $payload['system'] = $systemPrompt;
@@ -106,5 +106,38 @@ final class AnthropicClient implements ClientInterface
         }
 
         return $result;
+    }
+
+    /**
+     * Anthropic's schema requires `tool_use.input` to be a JSON object. PHP's
+     * `json_decode(..., true)` collapses `{}` and `[]` to the same `[]`, so an
+     * empty input round-trips back as a JSON array and the API rejects it.
+     * Cast empty arrays to `(object) []` here so `json_encode` emits `{}`.
+     *
+     * @param list<array<string, mixed>> $messages
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function normaliseMessages(array $messages): array
+    {
+        foreach ($messages as $i => $message) {
+            $content = $message['content'] ?? null;
+            if (!is_array($content)) {
+                continue;
+            }
+            foreach ($content as $j => $block) {
+                if (!is_array($block)) {
+                    continue;
+                }
+                if (($block['type'] ?? null) === 'tool_use' && ($block['input'] ?? null) === []) {
+                    $block['input'] = (object) [];
+                    $content[$j] = $block;
+                }
+            }
+            $message['content'] = $content;
+            $messages[$i] = $message;
+        }
+
+        return $messages;
     }
 }

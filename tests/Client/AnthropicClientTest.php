@@ -94,6 +94,52 @@ final class AnthropicClientTest extends TestCase
         new AnthropicClient($this->makeHttpFake(), $factory, $factory, '');
     }
 
+    public function testEmptyToolUseInputSerializedAsObject(): void
+    {
+        $client = $this->makeClient();
+
+        $client->sendMessages([
+            ['role' => 'user', 'content' => 'what time is it'],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'call_abc', 'name' => 'get_current_time', 'input' => []],
+            ]],
+            ['role' => 'user', 'content' => [
+                ['type' => 'tool_result', 'tool_use_id' => 'call_abc', 'content' => '1700000000'],
+            ]],
+        ], []);
+
+        self::assertNotEmpty($this->captured);
+        $rawBody = (string) $this->captured[count($this->captured) - 1]->getBody();
+        self::assertStringContainsString('"input":{}', $rawBody);
+        self::assertStringNotContainsString('"input":[]', $rawBody);
+    }
+
+    public function testNonEmptyToolUseInputIsUnaffected(): void
+    {
+        $client = $this->makeClient();
+
+        $client->sendMessages([
+            ['role' => 'user', 'content' => 'weather'],
+            ['role' => 'assistant', 'content' => [
+                ['type' => 'tool_use', 'id' => 'call_xyz', 'name' => 'get_weather', 'input' => ['city' => 'Berlin']],
+            ]],
+            ['role' => 'user', 'content' => [
+                ['type' => 'tool_result', 'tool_use_id' => 'call_xyz', 'content' => 'sunny'],
+            ]],
+        ], []);
+
+        $body = $this->lastRequestBody();
+        $messages = $body['messages'] ?? null;
+        self::assertIsArray($messages);
+        $assistant = $messages[1] ?? null;
+        self::assertIsArray($assistant);
+        $content = $assistant['content'] ?? null;
+        self::assertIsArray($content);
+        $block = $content[0] ?? null;
+        self::assertIsArray($block);
+        self::assertSame(['city' => 'Berlin'], $block['input'] ?? null);
+    }
+
     public function testFromEnvironmentBuildsClientWithoutArguments(): void
     {
         $previous = getenv('ANTHROPIC_API_KEY');

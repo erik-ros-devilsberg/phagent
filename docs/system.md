@@ -248,3 +248,24 @@ Added `Client\OpenAIClient` as the second implementation of `Client\ClientInterf
 - `examples/run.php` is still Anthropic-only. Provider selection in the example is sprint 08 territory (see backlog).
 - Story 07 (`tool_use.input` empty-object round-trip) remains open for `AnthropicClient`. `OpenAIClient` sidesteps it via `(object) $input` casting at the adapter boundary — but the kernel-side fix for Anthropic still belongs in story 07.
 
+## Bug fix — `tool_use.input` empty-object round-trip (2026-05-17)
+
+**Stories:** [07-tool-use-empty-input-round-trip](user-stories/done/07-tool-use-empty-input-round-trip.md)
+
+Closed a defect that blocked `examples/run.php` against the live Anthropic API whenever the model called a tool with no arguments (e.g. `GetCurrentTimeTool`). Root cause is PHP's lossy JSON decode: `json_decode($body, true)` collapses both `{}` and `[]` to the same PHP `[]`. The Anthropic response carries `tool_use.input` as a JSON object; the kernel echoes the decoded `content` blocks back on the next turn; `json_encode` then emits `"input":[]`, and Anthropic's schema validator rejects the request with `HTTP 400: messages.<n>.content.<m>.tool_use.input: Input should be an object`. The bug only surfaces for tools with no parameters — tools with arguments fill `input` with a non-empty object that round-trips correctly.
+
+### What was built / changed
+
+- `src/Client/AnthropicClient.php` — new private `normaliseMessages(array $messages): array` walker called from `sendMessages()` immediately before building the request payload. Scans each message's `content` list; for any block where `type === 'tool_use'` and `input === []`, rewrites `input` to `(object) []` so `json_encode` emits `{}` on the wire. Scoped to `tool_use` blocks only — `tools: []`, `messages: []`, and other `content: []` arrays are correctly JSON arrays and left untouched.
+- `tests/Client/AnthropicClientTest.php` — two new tests: `testEmptyToolUseInputSerializedAsObject` (string-asserts `"input":{}` is present and `"input":[]` is absent in the captured PSR-7 request body) and `testNonEmptyToolUseInputIsUnaffected` (regression guard: `['city' => 'Berlin']` round-trips exactly).
+
+### Key decisions
+
+- **Fix at the outgoing-payload boundary, not at the decode boundary.** Normalising at decode time would force the kernel's `array<string, mixed>` typed shape to accept `\stdClass` in one specific position, rippling through `AgentLoop` and its PHPStan annotations for no real gain. The wire-format quirk belongs in the wire-format adapter.
+- **Adapter-only fix, not kernel-side.** `OpenAIClient` already sidesteps the same quirk by casting `(object) $input` when JSON-encoding `tool_calls[*].function.arguments` (sprint 04). Each adapter handles its own provider's wire-format requirements; `AgentLoop` and `ClientInterface` stay neutral.
+- **No change to `ClientInterface` or `AgentLoop`.** The defect is entirely inside `AnthropicClient`; nothing else needed touching.
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors (`\stdClass` is accepted inside `array<string, mixed>` without annotation tweaks, as expected), PHPUnit **31 tests / 90 assertions** all green (was 29 / 80 — added 2 tests, 10 assertions). Live-API smoke test of `examples/run.php "what time is it"` against Anthropic confirmed the full tool-use round trip: turn 1 returns `stop_reason: tool_use`, the loop runs `get_current_time` with `input: []`, turn 2 receives the timestamp result and returns `stop_reason: end_turn` with a natural-language answer — no HTTP 400.
+
