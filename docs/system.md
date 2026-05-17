@@ -199,3 +199,52 @@ Replaced direct Guzzle coupling in `Client\AnthropicClient` with the standard PS
 - No PSR-18 discovery (`php-http/discovery`) — if Guzzle is absent and the consumer doesn't pass factories, `fromEnvironment()` throws.
 - The OpenAI adapter (sprint 04, still pending) will need the same PSR-18 treatment; its plan's "no new dependency" shaping note must be revisited when executed.
 
+## OpenAI provider adapter (2026-05-17)
+
+**Stories:** [04-openai-provider](user-stories/done/04-openai-provider.md)
+
+Added `Client\OpenAIClient` as the second implementation of `Client\ClientInterface`. Lands the **provider-agnostic** promise from `CLAUDE.md`: `AgentLoop` runs unchanged against either Anthropic or OpenAI (and, through `$baseUrl`, against every OpenAI-compatible endpoint — Groq, Together, OpenRouter, vLLM, llama.cpp's OpenAI mode, Ollama's `/v1/chat/completions` shim, Alibaba DashScope's OpenAI mode for Qwen, etc.). The forcing function worked as intended: the act of writing a second adapter exposed exactly which fields of the `ClientInterface` return shape the loop actually depends on, and made the neutral protocol explicit at the interface level.
+
+### What was built / changed
+
+- `src/Client/ClientInterface.php` — docblock now formally documents the kernel's neutral internal protocol: the `$messages` block shapes (`text` / `tool_use` / `tool_result`), the `$tools` schema shape, and the `sendMessages` return shape (`stop_reason` string + `content` list of `text` / `tool_use` blocks). No code change — the existing return was already neutral; the docblock made the implicit contract explicit.
+- `src/Client/OpenAIClient.php` — new. Constructor signature mirrors `AnthropicClient` (PSR-18 client + PSR-17 `RequestFactoryInterface` + `StreamFactoryInterface` + `$apiKey`), plus `$model = self::DEFAULT_MODEL`, `$baseUrl = self::DEFAULT_BASE_URL`, `$maxTokens = self::DEFAULT_MAX_TOKENS`. No `GuzzleHttp\*` types except in the guarded `fromEnvironment()` fallback.
+  - `DEFAULT_MODEL = 'gpt-4o'` — broadly-available tool-calling-capable Chat Completions model. One-line swap for newer / cheaper choices.
+  - `DEFAULT_BASE_URL = 'https://api.openai.com/v1/chat/completions'`. The PSR-7 request URI is built from `$this->baseUrl` (not the constant) so any compatible endpoint works.
+  - `fromEnvironment()` reads `OPENAI_API_KEY` (required) and `OPENAI_BASE_URL` (optional, defaults to OpenAI), with the same guarded Guzzle PSR-18 fallback as `AnthropicClient`.
+  - `sendMessages()` translates the neutral message list → OpenAI Chat Completions request and the OpenAI response → neutral shape. Wire-format mapping:
+    - Outgoing: `text` blocks concatenate into `message.content`; `tool_use` blocks become `message.tool_calls[*].function` entries with `arguments` JSON-encoded as `(object) $input` so empty input round-trips as `{}` (not `[]`); `tool_result` blocks split off into separate `role: tool` messages with `tool_call_id` and a flattened (string-or-JSON-encoded) `content`; an optional `$systemPrompt` lands as a `role: system` message at index 0.
+    - Incoming: `choices[0].message.tool_calls` map to neutral `tool_use` blocks, with `arguments` JSON-decoded back into the `input` array; `choices[0].message.content` becomes a single `text` block; `finish_reason` maps `stop → end_turn`, `tool_calls → tool_use`, `length → max_tokens` (other values pass through unchanged).
+  - Non-2xx responses throw `RuntimeException` carrying the full body, consistent with the post-sprint-06 `AnthropicClient` error surface.
+- `tests/Client/OpenAIClientTest.php` — new. 12 tests / 30 assertions using the same hand-rolled anonymous PSR-18 fake pattern as `AnthropicClientTest`. Covers: text happy path, tool-call response → neutral shape, empty `arguments` → empty array, `tool_result` round-trip (asserts the assistant `tool_calls` and `role: tool` shapes on the captured outgoing PSR-7 request), `fromEnvironment()` missing-key throw, `fromEnvironment()` smoke (with key set), non-default `$baseUrl` honoured on outgoing URI, `OPENAI_BASE_URL` env honoured, empty-key constructor rejection, `Bearer` authorization header, `finish_reason: length` → `max_tokens`, tool-schema translation. All env-var tests back up and restore `OPENAI_API_KEY` / `OPENAI_BASE_URL` to keep the suite hermetic.
+
+### Key decisions
+
+- **Neutral protocol canonicalised, not redesigned.** Phase 1 of the sprint plan anticipated a possible `ClientInterface` redesign. In practice the existing return shape was already neutral (Anthropic's block list is a strict superset of what OpenAI emits); only the docblock needed updating. `AgentLoop` was not touched.
+- **`json_encode((object) $input)` for outgoing `tool_calls[*].function.arguments`.** OpenAI requires `arguments` to be a JSON-encoded *string* that decodes to an *object*. PHP's `json_encode([])` gives `"[]"`, which would round-trip as a JSON array on the wire and trip schema validators. Casting to `(object)` forces `"{}"` for empty input — proactively avoids the same `tool_use.input` round-trip bug that story 07 will fix for the Anthropic adapter.
+- **`tool_result` content flattened to a string at the adapter boundary.** OpenAI's `role: tool` message expects `content` as a string. The adapter passes plain strings through unchanged and `json_encode`s any non-string content. The neutral protocol stays simple (content is `string`); the wire-format quirk lives in the translator where it belongs.
+- **Bearer auth, not `x-api-key`.** OpenAI's convention. Lives entirely inside the adapter; the kernel knows nothing about either header.
+- **`max_tokens` is per-instance, not per-call.** Same pattern as `AnthropicClient` (post-sprint-05). Sized to a sensible 1024 default; one constructor arg away from any other budget.
+- **`$baseUrl` from day one.** Adding it later would have been a breaking constructor change. Costs one extra parameter, one extra test pair (constructor + env), and unlocks every OpenAI-compatible endpoint without a second adapter. Verified end-to-end via the captured PSR-7 request URI in `testNonDefaultBaseUrlIsHonouredOnOutgoingRequest` and `testFromEnvironmentHonoursOpenAiBaseUrlEnv`.
+- **Smoke-test coverage for compatible endpoints is deferred to consumers.** The plan called for a "two or three endpoints smoke-tested" note; in practice the unit-test coverage of `$baseUrl` substitution proves the contract, and live smoke tests against Groq / Together / DashScope require API keys and network access that don't belong in `composer check`. Consumers point `OPENAI_BASE_URL` at their endpoint and run `examples/run.php` (after sprint 08's CLI provider-selection lands, or via a small custom bootstrap today).
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit **29 tests / 80 assertions** all green (was 17 / 50 — added 12 tests, 30 assertions). No new production dependencies; `composer.json` `require` unchanged from sprint 06.
+
+### Capabilities after this sprint
+
+- `new OpenAIClient($http, $reqFactory, $streamFactory, $apiKey)` — drop-in second provider for the `AgentLoop`.
+- `OpenAIClient::fromEnvironment()` — zero-arg construction with `OPENAI_API_KEY` (and optional `OPENAI_BASE_URL`) from env / `.env`.
+- Configurable `$baseUrl` lets one adapter target OpenAI, Groq, Together, OpenRouter, Fireworks, vLLM, llama.cpp's OpenAI server, Ollama's OpenAI shim, and Alibaba DashScope's OpenAI mode (Qwen) — without a second adapter.
+- `ClientInterface` is now a documented, neutral port. Any future adapter (Ollama native, DashScope native, etc.) translates to and from the same shape.
+
+### Not yet supported (foreseeable next sprints)
+
+- Live smoke tests against compatible endpoints are not part of CI. Consumer responsibility.
+- Streaming responses (OpenAI supports SSE; `ClientInterface` is request/response only).
+- Multi-modal inputs (images, audio).
+- Token-usage / cost reporting on `AgentResult` — OpenAI returns `usage` but the kernel discards it.
+- `examples/run.php` is still Anthropic-only. Provider selection in the example is sprint 08 territory (see backlog).
+- Story 07 (`tool_use.input` empty-object round-trip) remains open for `AnthropicClient`. `OpenAIClient` sidesteps it via `(object) $input` casting at the adapter boundary — but the kernel-side fix for Anthropic still belongs in story 07.
+
