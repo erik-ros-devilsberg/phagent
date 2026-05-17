@@ -236,7 +236,7 @@ Added `Client\OpenAIClient` as the second implementation of `Client\ClientInterf
 
 - `new OpenAIClient($http, $reqFactory, $streamFactory, $apiKey)` — drop-in second provider for the `AgentLoop`.
 - `OpenAIClient::fromEnvironment()` — zero-arg construction with `OPENAI_API_KEY` (and optional `OPENAI_BASE_URL`) from env / `.env`.
-- Configurable `$baseUrl` lets one adapter target OpenAI, Groq, Together, OpenRouter, Fireworks, vLLM, llama.cpp's OpenAI server, Ollama's OpenAI shim, and Alibaba DashScope's OpenAI mode (Qwen) — without a second adapter.
+- Configurable `$baseUrl` lets one adapter target OpenAI, Groq, Together, OpenRouter, Fireworks, vLLM, llama.cpp's OpenAI server, Ollama's OpenAI shim, and Alibaba DashScope's OpenAI mode (Qwen) — without a second adapter. See the "Providers" section in `README.md` for the env-var recipe per endpoint.
 - `ClientInterface` is now a documented, neutral port. Any future adapter (Ollama native, DashScope native, etc.) translates to and from the same shape.
 
 ### Not yet supported (foreseeable next sprints)
@@ -268,4 +268,31 @@ Closed a defect that blocked `examples/run.php` against the live Anthropic API w
 ### Verification
 
 `composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors (`\stdClass` is accepted inside `array<string, mixed>` without annotation tweaks, as expected), PHPUnit **31 tests / 90 assertions** all green (was 29 / 80 — added 2 tests, 10 assertions). Live-API smoke test of `examples/run.php "what time is it"` against Anthropic confirmed the full tool-use round trip: turn 1 returns `stop_reason: tool_use`, the loop runs `get_current_time` with `input: []`, turn 2 receives the timestamp result and returns `stop_reason: end_turn` with a natural-language answer — no HTTP 400.
+
+## Symfony HttpClient summariser example (2026-05-17)
+
+**Stories:** [08-example-symfony-http-client](user-stories/done/08-example-symfony-http-client.md)
+
+Added `examples/run-summarise.php` as the executable proof of two distinct kernel guarantees that the existing `examples/run.php` did not exercise:
+
+1. **The PSR-18 port is real.** A single `Symfony\Component\HttpClient\Psr18Client` instance is wired into all three constructor slots of `AnthropicClient` (`new AnthropicClient($http, $http, $http, $apiKey)`). `Psr18Client` implements `Psr\Http\Client\ClientInterface`, `Psr\Http\Message\RequestFactoryInterface`, and `Psr\Http\Message\StreamFactoryInterface` natively — one-class swap, zero Guzzle autoload. Any other PSR-18-compliant client (Buzz, a framework's own, etc.) would work identically.
+2. **The canonical task-specific-agent shape.** Empty `ToolRegistry()` + a hardcoded `$systemPrompt` ("You are a summariser. … respond with a single concise sentence …") drives the loop into a one-turn `stop_reason: end_turn` flow. This is the CLAUDE.md "agent that summarises news articles, runs unattended in a background queue, and never talks to a human" use case — the harness's reason-to-exist made executable.
+
+### What was built / changed
+
+- `composer.json` — `require-dev` gained `symfony/http-client ^8` (composer resolved to the latest major; Symfony 7 was the original target but `Psr18Client` is API-stable across both) and `nyholm/psr7 ^1`. Both are dev-scoped; production `require` is unchanged. `nyholm/psr7` is mandatory: `Psr18Client::__construct()` auto-discovers a `Psr\Http\Message\ResponseFactoryInterface` at runtime and throws `\LogicException` if none is installed.
+- `examples/run-summarise.php` — new. Mirrors `run.php`'s I/O conventions (argv-or-stdin prompt, dotenv loading, `StdoutLogger`, stderr summary line) but constructs `AnthropicClient` explicitly with `Psr18Client`, registers no tools, and passes a system prompt to `AgentLoop::run()`. Guards both missing `ANTHROPIC_API_KEY` and empty prompt with clear stderr messages.
+- `README.md` — new "Examples" subsection (after "Providers") distinguishes the two examples by purpose: `run.php` exercises the multi-turn tool loop; `run-summarise.php` exercises the no-tools / system-prompt path with a non-Guzzle HTTP client.
+
+### Key decisions
+
+- **One file, two demonstrations.** A separate "Symfony swap" example and a separate "summariser" example would duplicate boilerplate without proving more. Combining them in one file shows that both axes are independent and composable.
+- **`nyholm/psr7` over `php-http/discovery`.** Discovery would add a runtime resolution layer; explicit `nyholm/psr7` is the simpler one-liner and matches `Psr18Client`'s preferred backend.
+- **No call to `AnthropicClient::fromEnvironment()`.** The factory would have silently used Guzzle's PSR-18 fallback, defeating the demonstration. Explicit construction is the point.
+- **Hardcoded system prompt, not configurable.** The example is a fixed-purpose summariser; making the prompt CLI-tunable would add an arg-parsing layer that distracts from the demonstration. A consumer copying the example into their own bootstrap is expected to swap the prompt for their own task.
+- **Empty `ToolRegistry`.** Confirms the loop handles the no-tools path cleanly — terminates on turn 1 with `stop_reason: end_turn`, no tool dispatch invoked.
+
+### Verification
+
+`composer check` exits zero (PHP-CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 31 tests / 90 assertions all green — examples are out of lint and static-analysis scope per `.php-cs-fixer.php` and `phpstan.neon`, both of which already restrict themselves to `src/` and `tests/`). Live-API smoke test against Anthropic is the developer's manual step — `echo "Some article text…" | php examples/run-summarise.php` should produce `turns=1 stop_reason=end_turn`.
 

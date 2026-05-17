@@ -34,8 +34,13 @@ try {
 $registry = new ToolRegistry();
 $registry->register(new GetCurrentTimeTool());
 
-$loop = new AgentLoop($client, $registry, new StdoutLogger());
+$logLevel = getenv('PHAGENT_LOG_LEVEL');
+$logger = is_string($logLevel) && $logLevel !== '' ? new StdoutLogger($logLevel) : null;
+
+$loop = new AgentLoop($client, $registry, $logger);
 $result = $loop->run($prompt);
 
 echo $result->text, "\n";
-fwrite(STDERR, sprintf("[turns=%d stop_reason=%s]\n", $result->turns, $result->stopReason));
+if ($logger !== null) {
+    fwrite(STDERR, sprintf("[turns=%d stop_reason=%s]\n", $result->turns, $result->stopReason));
+}
