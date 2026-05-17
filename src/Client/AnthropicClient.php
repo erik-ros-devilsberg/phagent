@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace Phagent\Client;
 
-use GuzzleHttp\ClientInterface as GuzzleClientInterface;
+use Psr\Http\Client\ClientInterface as HttpClientInterface;
+use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\StreamFactoryInterface;
 
 final class AnthropicClient implements ClientInterface
 {
@@ -14,7 +16,9 @@ final class AnthropicClient implements ClientInterface
     public const string API_VERSION = '2023-06-01';
 
     public function __construct(
-        private readonly GuzzleClientInterface $http,
+        private readonly HttpClientInterface $http,
+        private readonly RequestFactoryInterface $requestFactory,
+        private readonly StreamFactoryInterface $streamFactory,
         private readonly string $apiKey,
         private readonly string $model = self::DEFAULT_MODEL,
         private readonly int $maxTokens = self::DEFAULT_MAX_TOKENS,
@@ -24,8 +28,11 @@ final class AnthropicClient implements ClientInterface
         }
     }
 
-    public static function fromEnvironment(?GuzzleClientInterface $http = null): self
-    {
+    public static function fromEnvironment(
+        ?HttpClientInterface $http = null,
+        ?RequestFactoryInterface $requestFactory = null,
+        ?StreamFactoryInterface $streamFactory = null,
+    ): self {
         $apiKey = getenv('ANTHROPIC_API_KEY');
         if (!is_string($apiKey) || $apiKey === '') {
             throw new \RuntimeException(
@@ -33,7 +40,22 @@ final class AnthropicClient implements ClientInterface
             );
         }
 
-        return new self($http ?? new \GuzzleHttp\Client(), $apiKey);
+        if ($http === null || $requestFactory === null || $streamFactory === null) {
+            // Guarded fallback: only loaded when caller does not supply a PSR-18/17 stack.
+            if (!class_exists(\GuzzleHttp\Client::class) || !class_exists(\GuzzleHttp\Psr7\HttpFactory::class)) {
+                throw new \RuntimeException(
+                    'No PSR-18 HTTP client or PSR-17 factories were provided, and the default '
+                    . 'Guzzle fallback (guzzlehttp/guzzle) is not installed. Either install Guzzle '
+                    . 'or pass your own client and factories to AnthropicClient::fromEnvironment().',
+                );
+            }
+            $factory = new \GuzzleHttp\Psr7\HttpFactory();
+            $http ??= new \GuzzleHttp\Client();
+            $requestFactory ??= $factory;
+            $streamFactory ??= $factory;
+        }
+
+        return new self($http, $requestFactory, $streamFactory, $apiKey);
     }
 
     public function sendMessages(array $messages, array $tools, ?string $systemPrompt = null): array
@@ -50,16 +72,26 @@ final class AnthropicClient implements ClientInterface
             $payload['tools'] = $tools;
         }
 
-        $response = $this->http->request('POST', self::API_URL, [
-            'headers' => [
-                'x-api-key' => $this->apiKey,
-                'anthropic-version' => self::API_VERSION,
-                'content-type' => 'application/json',
-            ],
-            'json' => $payload,
-        ]);
+        $request = $this->requestFactory->createRequest('POST', self::API_URL)
+            ->withHeader('x-api-key', $this->apiKey)
+            ->withHeader('anthropic-version', self::API_VERSION)
+            ->withHeader('content-type', 'application/json')
+            ->withBody($this->streamFactory->createStream(
+                json_encode($payload, JSON_THROW_ON_ERROR),
+            ));
+
+        $response = $this->http->sendRequest($request);
 
         $body = (string) $response->getBody();
+        $status = $response->getStatusCode();
+        if ($status < 200 || $status >= 300) {
+            throw new \RuntimeException(sprintf(
+                'Anthropic API returned HTTP %d: %s',
+                $status,
+                $body,
+            ));
+        }
+
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
             throw new \RuntimeException('Anthropic API returned a non-JSON response.');

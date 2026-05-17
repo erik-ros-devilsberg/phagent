@@ -155,3 +155,47 @@ Brought the public API surface up to the minimum needed for a Laravel app to dri
 - No way to swap the tool set per `run()` call — the registry is fixed at construction.
 - `fromEnvironment()` still ignores model/tokens overrides.
 
+## PSR-18 HTTP client port (2026-05-17)
+
+**Stories:** [06-psr18-http-client](user-stories/done/06-psr18-http-client.md)
+
+Replaced direct Guzzle coupling in `Client\AnthropicClient` with the standard PSR HTTP contracts (PSR-18 client, PSR-17 request/stream factories, PSR-7 messages). Guzzle moved from `require` to `require-dev`. Honours the **library-first, framework-agnostic, PSR-friendly** promises in `CLAUDE.md`: a Laravel or Symfony app embedding phagent now reuses the PSR-18 client it already has, instead of installing Guzzle's full transitive tree (`guzzlehttp/psr7`, `guzzlehttp/promises`, `ralouphie/getallheaders`, `symfony/deprecation-contracts`) as a second HTTP stack. Same philosophy the kernel applied to logging in the PSR-3 sprint.
+
+### What was built / changed
+
+- `composer.json` — `require` lost `guzzlehttp/guzzle ^7.9`, gained `psr/http-client ^1.0`, `psr/http-factory ^1.0`, `psr/http-message ^2.0`. `guzzlehttp/guzzle ^7.9` moved to `require-dev` so tests and `examples/run.php` still resolve.
+- `src/Client/AnthropicClient.php`:
+  - Constructor signature is now `(HttpClientInterface $http, RequestFactoryInterface $requestFactory, StreamFactoryInterface $streamFactory, string $apiKey, string $model = ..., int $maxTokens = ...)`. The Guzzle type hint is gone; no `GuzzleHttp\*` symbol appears anywhere in `src/`.
+  - `sendMessages` builds a `Psr\Http\Message\RequestInterface` via the injected factories, sets `x-api-key`, `anthropic-version`, and `content-type` via `withHeader`, encodes the payload with `json_encode($payload, JSON_THROW_ON_ERROR)` into a stream, and dispatches via `$this->http->sendRequest($request)`. No `['json' => …]` Guzzle option array remains.
+  - `fromEnvironment(?HttpClientInterface, ?RequestFactoryInterface, ?StreamFactoryInterface)` — keeps zero-argument ergonomics. When any of the three is missing it falls back to `\GuzzleHttp\Client` + `\GuzzleHttp\Psr7\HttpFactory` (Guzzle's PSR-7/17 implementation), guarded by a `class_exists` check that throws a clear `RuntimeException` if Guzzle is absent. This is the only place `GuzzleHttp\*` is referenced in `src/`, and consumers who supply their own stack never autoload the Guzzle classes.
+- `tests/Client/AnthropicClientTest.php`:
+  - Replaced the Guzzle `callable` handler with a small hand-rolled anonymous PSR-18 `ClientInterface` fake that captures the outgoing `RequestInterface` via a closure (avoids PHPStan's "property only written" complaint on a captured-by-reference list) and returns a canned `200` response via the test's PSR-17 factory.
+  - New `testSendsPsr7RequestWithExpectedShape` asserts method, URI, and headers on the captured PSR-7 request.
+  - New `testFromEnvironmentBuildsClientWithoutArguments` smoke-tests the guarded Guzzle fallback path without making an HTTP call. Backs up and restores `ANTHROPIC_API_KEY`.
+  - Tests still depend on `GuzzleHttp\Psr7\HttpFactory` for convenience PSR-7/17 construction — acceptable because it's dev-scoped.
+- `examples/run.php` — unchanged. `AnthropicClient::fromEnvironment()` continues to work with no arguments.
+
+### Key decisions
+
+- **PSR-17 factories injected, not pulled from a global locator.** Adding `php-http/discovery` would let `fromEnvironment()` magically find any installed PSR-17 implementation, but it's another transitive dep and another layer of indirection. Direct injection plus a guarded Guzzle fallback covers the two real cases (consumer brings their own; or runs the example/dev install). If a real user ever asks for discovery, add it then.
+- **Three constructor args for HTTP, not one bundled config object.** The three PSR interfaces are the boundary; bundling them in a wrapper class would re-invent what PSR-17 already standardises and make the constructor harder to satisfy from a DI container.
+- **Guzzle stays in `require-dev`, not removed entirely.** It backs `fromEnvironment()`'s fallback and the test fakes' PSR-7/17 plumbing. Removing it would force `examples/run.php` to wire factories explicitly, which is exactly the friction the factory method exists to avoid.
+- **`fromEnvironment()` keeps zero-argument ergonomics.** A library that demands consumers wire three PSR factories before they can `getting started` loses to one that "just works" against the demo. The `class_exists` guard means the convenience is opt-in, not a hard dependency.
+- **Hand-rolled PSR-18 test fake over `MockHandler` + adapter.** An anonymous class implementing one method (`sendRequest`) is ~12 lines and reads as the test's intent. Wrapping `MockHandler` would re-introduce a Guzzle type in the test for no readability gain.
+- **`JSON_THROW_ON_ERROR` on the encode.** Returns `string` (not `string|false`), so PHPStan level 8 needs no guard. Encoding failures throw `JsonException` rather than silently producing an empty body.
+
+### Verification
+
+`composer check` exits zero: CS-Fixer clean, PHPStan level 8 zero errors, PHPUnit 17 tests / 50 assertions green (was 15 / 43 — added 2 tests, 7 assertions). `composer why guzzlehttp/guzzle` confirms the package is required only "for development" by `devilsberg/phagent`, and `guzzlehttp/psr7` + `guzzlehttp/promises` are required only by Guzzle itself — so `composer install --no-dev` pulls zero Guzzle packages.
+
+### Capabilities after this sprint
+
+- Consumers with an existing PSR-18 stack (Symfony HttpClient, Buzz, Guzzle, etc.) construct `new AnthropicClient($theirClient, $theirRequestFactory, $theirStreamFactory, $apiKey, …)` and pull zero Guzzle packages.
+- `AnthropicClient::fromEnvironment()` continues to "just work" out of the box for `examples/run.php` and CLI use, provided Guzzle is installed (which it is, as a dev dep, in any cloned working tree).
+- The kernel's only HTTP-related production dependencies are the three PSR contracts.
+
+### Not yet supported (foreseeable next sprints)
+
+- No PSR-18 discovery (`php-http/discovery`) — if Guzzle is absent and the consumer doesn't pass factories, `fromEnvironment()` throws.
+- The OpenAI adapter (sprint 04, still pending) will need the same PSR-18 treatment; its plan's "no new dependency" shaping note must be revisited when executed.
+

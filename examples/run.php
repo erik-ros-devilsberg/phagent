@@ -5,6 +5,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/StdoutLogger.php';
 
+Dotenv\Dotenv::createUnsafeImmutable(__DIR__ . '/..')->safeLoad();
+
 use Phagent\AgentLoop;
 use Phagent\Client\AnthropicClient;
 use Phagent\Examples\StdoutLogger;
